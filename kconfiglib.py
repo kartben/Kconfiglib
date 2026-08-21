@@ -541,6 +541,7 @@ For bug reports, suggestions, and questions, please open a ticket on the GitHub
 page.
 """
 import errno
+import gc
 import importlib
 import os
 import re
@@ -933,8 +934,24 @@ class Kconfig(object):
           Other exceptions besides EnvironmentError and KconfigError are still
           propagated when suppress_traceback is True.
         """
+        # Parsing builds a big graph of objects that all stay alive until the
+        # Kconfig instance is dropped. The cyclic garbage collector reacts to
+        # that by running ever more expensive full collections while the graph
+        # grows, each one walking all of it in search of cycles that are hardly
+        # ever there. On the Zephyr Kconfig tree that is over 20% of the
+        # parsing time, to free a few dozen objects in total.
+        #
+        # Reference counting handles the short-lived objects on its own, so
+        # keep the collector out of the way until the tree is built, then let
+        # it look at everything once. Doing that single pass here is also what
+        # keeps the first collection after parsing cheap.
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+
         try:
             self._init(filename, warn, warn_to_stderr, encoding)
+            if gc_was_enabled:
+                gc.collect()
         except (EnvironmentError, KconfigError) as e:
             if suppress_traceback:
                 cmd = sys.argv[0]  # Empty string if missing
@@ -945,6 +962,9 @@ class Kconfig(object):
                 # them here.
                 sys.exit(cmd + str(e).strip())
             raise
+        finally:
+            if gc_was_enabled:
+                gc.enable()
 
     def _init(self, filename, warn, warn_to_stderr, encoding):
         # See __init__()
