@@ -426,6 +426,30 @@ def_tristate, allowing int, hex, and string symbols to be given a type and a
 default at the same time.
 
 
+Caching $(shell,...) results
+----------------------------
+
+The commands Kconfig runs through $(shell,...) are almost always toolchain
+probes -- $(cc-option,...), $(as-instr,...), $(ld-option,...) and friends, all
+defined in terms of $(shell,...) by scripts/Kconfig.include in the Linux
+kernel. Each one runs a shell that runs a compiler, and a full x86 kernel
+Kconfig fires about a hundred of them. That is most of the time a load takes.
+
+Results are always remembered for the lifetime of a Kconfig instance. If
+KCONFIG_SHELL_CACHE names a file, they are also written there and reused by
+later runs, which makes a repeat load spend nothing on probing at all. For
+example:
+
+  $ export KCONFIG_SHELL_CACHE=.kconfig-shell-cache
+  $ make menuconfig
+
+The cache is keyed on the environment variables the probes read (CC, LD, PATH,
+CC_VERSION_TEXT and so on), so changing compiler discards it. It is off by
+default because $(shell,...) is a general facility and nothing stops a Kconfig
+file from using it for something that is not a pure function of the
+environment; enable it only if your tree's $(shell,...) uses are probes.
+
+
 Extra optional warnings
 -----------------------
 
@@ -810,6 +834,7 @@ class Kconfig(object):
     __slots__ = (
         "_encoding",
         "_functions",
+        "_shell_cache",
         "_set_match",
         "_srctree_prefix",
         "_unset_match",
@@ -949,8 +974,38 @@ class Kconfig(object):
     def _init(self, filename, warn, warn_to_stderr, encoding):
         # See __init__()
 
+        # Parsing allocates hundreds of thousands of objects -- symbols, menu
+        # nodes, and an expression tuple for every condition -- and nearly all
+        # of them stay live until the Kconfig instance dies. Almost nothing it
+        # creates is cyclic garbage either: the temporaries (regex matches,
+        # discarded expression tuples, expanded strings) are all freed by
+        # reference counting.
+        #
+        # That makes every cyclic collection triggered during the parse pure
+        # overhead -- a walk over a heap that only grows and that it cannot
+        # free. On the full Zephyr tree it comes to 891 collections and about a
+        # fifth of the total time. Switch the collector off for the duration
+        # and put it back the way we found it afterwards.
+        #
+        # The allocation counters keep running while the collector is off, so
+        # the first collection after the parse is a full one. That is the point:
+        # one full collection over the finished tree, instead of several while
+        # it is being built.
+        #
+        # Only import as needed, to save some startup time
+        import gc
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            self._init_inner(filename, warn, warn_to_stderr, encoding)
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+
+    def _init_inner(self, filename, warn, warn_to_stderr, encoding):
         self._encoding = encoding
 
+        self._shell_cache = _ShellCache(os.getenv("KCONFIG_SHELL_CACHE"))
         self.srctree = os.getenv("srctree", "")
         # A prefix we can reliably strip from glob() results to get a filename
         # relative to $srctree. relpath() can cause issues for symlinks,
@@ -1111,6 +1166,8 @@ class Kconfig(object):
         # Add extra dependencies from choices to choice symbols that get
         # awkward during dependency loop detection
         self._add_choice_deps()
+
+        self._shell_cache.save()
 
     @property
     def mainmenu_text(self):
@@ -6868,8 +6925,92 @@ def _error_if_fn(kconf, _, cond, msg):
     return ""
 
 
+class _ShellCache(object):
+    # Remembers the output of $(shell,...) commands.
+    #
+    # The commands Kconfig runs through $(shell,...) are compiler and linker
+    # probes -- pure functions of the command line and of the toolchain. On the
+    # Linux kernel there are around a hundred of them, and running them is most
+    # of the time a full load takes.
+    #
+    # Results are always memoized for the lifetime of the Kconfig instance. If
+    # $KCONFIG_SHELL_CACHE names a file, they are also persisted there, keyed by
+    # a fingerprint of the environment variables the probes read, so that a
+    # later run with the same toolchain pays nothing at all. A changed
+    # fingerprint discards the file.
+    #
+    # Anything a command wrote to stderr is remembered alongside its output, so
+    # that a run served from the cache produces the same warnings as the run
+    # that filled it.
+
+    _ENV = (
+        "ARCH", "SRCARCH", "CC", "LD", "AS", "NM", "OBJCOPY", "OBJDUMP",
+        "READELF", "AR", "RUSTC", "HOSTCC", "HOSTCXX", "PAHOLE", "CLANG_FLAGS",
+        "KERNELVERSION", "srctree", "PATH", "USERCFLAGS", "USERLDFLAGS",
+        "CC_VERSION_TEXT",
+    )
+
+    def __init__(self, path):
+        self._path = path
+        self._results = {}
+        self._dirty = False
+        self._key = "\0".join(os.getenv(v, "") for v in self._ENV)
+        if path:
+            self._load()
+
+    def get(self, command):
+        # Returns an (output, stderr) pair, or None if the command is unknown
+        res = self._results.get(command)
+        return tuple(res) if res is not None else None
+
+    def add(self, command, output, stderr):
+        self._results[command] = (output, stderr)
+        self._dirty = True
+
+    def _load(self):
+        # Only import as needed, to save some startup time
+        import json
+        try:
+            with open(self._path, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+        except (EnvironmentError, ValueError):
+            # No cache yet, or one we can't read. Not worth complaining about
+            return
+
+        if isinstance(cached, dict) and cached.get("key") == self._key:
+            results = cached.get("results")
+            if isinstance(results, dict):
+                self._results = results
+
+    def save(self):
+        if not self._path or not self._dirty:
+            return
+        # Only import as needed, to save some startup time
+        import json
+        # Written to a temporary file and renamed into place, so that a build
+        # running several Kconfig instances at once can never read a half-
+        # written cache.
+        tmp = "{}.{}.tmp".format(self._path, os.getpid())
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"key": self._key, "results": self._results}, f)
+            os.replace(tmp, self._path)
+        except EnvironmentError:
+            try:
+                os.remove(tmp)
+            except EnvironmentError:
+                pass
+
+
 def _shell_fn(kconf, _, command):
     import subprocess  # Only import as needed, to save some startup time
+
+    cached = kconf._shell_cache.get(command)
+    if cached is not None:
+        stdout, stderr = cached
+        if stderr:
+            _warn_shell_stderr(kconf, command, stderr)
+        return stdout
 
     result = subprocess.run(
         command,
@@ -6880,12 +7021,18 @@ def _shell_fn(kconf, _, command):
     )
 
     if result.stderr:
-        kconf._warn("'{}' wrote to stderr: {}".format(
-                        command, "\n".join(result.stderr.splitlines())),
-                    kconf.loc)
+        _warn_shell_stderr(kconf, command, result.stderr)
 
     # Trailing newline removal, and newline-to-space conversion.
-    return result.stdout.rstrip("\n").replace("\n", " ")
+    stdout = result.stdout.rstrip("\n").replace("\n", " ")
+    kconf._shell_cache.add(command, stdout, result.stderr)
+    return stdout
+
+
+def _warn_shell_stderr(kconf, command, stderr):
+    kconf._warn("'{}' wrote to stderr: {}".format(
+                    command, "\n".join(stderr.splitlines())),
+                kconf.loc)
 
 #
 # Global constants
