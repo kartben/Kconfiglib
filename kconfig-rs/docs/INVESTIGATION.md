@@ -9,12 +9,15 @@ would expect it, and part of it belongs to the Python.
 
 Two thirds of a Linux Kconfig load is not parsing at all: it is a hundred
 `fork`/`exec` compiler probes. Caching those, and keeping the cyclic garbage
-collector out of the parse, are **two patches to `kconfiglib.py`** worth 2.9x on
-Linux and 1.18x on Zephyr — no rewrite involved. They are in this branch.
+collector out of the parse, are **two patches to `kconfiglib.py`** — no rewrite
+involved. They are in this branch, and they win on different trees: the probe
+cache is worth **2.9x on the kernel** and nothing on Zephyr, which fires no
+probes; the GC change is worth **15–20% on Zephyr** and is neutral on the
+kernel, where the parse is only a third of the load.
 
-Measured against Kconfiglib *with* those patches, the Rust loader is **8.7x** on
-Linux and **7.6x** on Zephyr — a consistent order of magnitude, on the work that
-is actually parsing. Against Kconfiglib as it was, Linux reads 26x, but that
+Measured against Kconfiglib *with* those patches, the Rust loader is **8.1x** on
+Linux and **7.5x** on Zephyr — a consistent order of magnitude, on the work that
+is actually parsing. Against Kconfiglib as it was, Linux reads 23x, but that
 number is mostly the probe cache, which the Python now has too.
 
 Rust is the right language for the native side; Go measures 1.5–1.7x slower on
@@ -92,34 +95,38 @@ parser and evaluator speed.
 
 | | total | breakdown |
 |---|---|---|
-| Kconfiglib, as it was | **2.432 s** | parse 2.364, eval+write 0.068, of which `$(shell)` ~1.6 |
+| Kconfiglib, as it was | **2.362 s** | parse 2.300, eval+write 0.061, of which `$(shell)` ~1.5 |
 | C `conf --allnoconfig` | 2.058 s | includes the same probes |
-| Kconfiglib, patched | 2.301 s | the GC patch only; probes still run |
-| Kconfiglib, patched, probe cache warm | **0.830 s** | parse 0.702, eval+write 0.128 |
+| Kconfiglib, patched | 2.351 s | probes still run; the GC change is in the noise here |
+| Kconfiglib, patched, probe cache warm | **0.815 s** | parse 0.680, eval+write 0.135 |
 | `kconf`, cold probe cache | 1.674 s | load 1.665, eval+write 0.009 |
-| `kconf`, warm probe cache | **0.095 s** | load 0.088, eval+write 0.007 |
+| `kconf`, warm probe cache | **0.101 s** | load 0.093, eval+write 0.008 |
 
 Like for like — both implementations with a warm probe cache — the Rust is
-**8.7x**. Against Kconfiglib as it was it reads 26x, but most of that gap is the
+**8.1x**. Against Kconfiglib as it was it reads 23x, but most of that gap is the
 probe cache rather than the language.
+
+The GC change does nothing measurable here, and that is the expected result:
+the parse is only ~0.9 s of the 2.4 s, so a 20% saving on it disappears into
+the run-to-run variance of the probes.
 
 ### Zephyr, all boards
 
 | | total | breakdown |
 |---|---|---|
-| Kconfiglib, as it was | **1.679 s** | parse 1.591, eval+write 0.088 |
-| Kconfiglib, patched | **1.410 s** | parse 1.224, eval+write 0.187 |
+| Kconfiglib, as it was | **1.663 s** | parse 1.573, eval+write 0.089 |
+| Kconfiglib, patched | **1.389 s** | parse 1.182, eval+write 0.206 |
 | `kconf` | **0.186 s** | load 0.174, eval+write 0.012 |
 
-**7.6x** against the patched Python, 9.0x against the original. Zephyr sits
+**7.5x** against the patched Python, 8.9x against the original. Zephyr sits
 lower than Linux because it sources 6044 files to Linux's 1605, and opening and
 reading them costs 34 ms that no amount of parser speed removes — the same 34 ms
 Kconfiglib pays.
 
-The patched Python spends noticeably more of its time rendering (0.187 s against
-0.088 s). That is the deferred cost of the GC patch: the first cyclic collection
-after the parse is a full one, which is the point — one full collection over the
-finished tree instead of six while it is being built.
+The patched Python spends noticeably more of its time rendering (0.206 s against
+0.089 s). That is the GC patch's cost surfacing: with the collector off during
+the parse, the first collection afterwards is a full one. It replaces the six
+full collections the parse used to trigger, so the total still comes out ahead.
 
 ### Where the remaining time goes
 
@@ -324,9 +331,9 @@ Python hooks are.
 If it were to be pursued, the order that keeps it useful throughout:
 
 1. ~~**Cache the shell probes in `kconfiglib.py`.**~~ Done on this branch,
-   along with keeping the cyclic collector out of the parse. Together: 2.9x on
-   the kernel, 1.18x on Zephyr, byte-identical output. Do this regardless of
-   what happens to the rest.
+   along with keeping the cyclic collector out of the parse. 2.9x on the kernel,
+   1.2x on Zephyr, byte-identical output, peak memory slightly *lower* than
+   before. Do this regardless of what happens to the rest.
 2. **Finish the loader** — `.config` reading, `set_value`, warning parity.
 3. **Ship it as a Python extension behind Kconfiglib's API**, with the callback
    hook for `KCONFIG_FUNCTIONS`. Not a fork: an optional accelerator that the

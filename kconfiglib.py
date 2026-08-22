@@ -987,14 +987,21 @@ class Kconfig(object):
         # fifth of the total time. Switch the collector off for the duration
         # and put it back the way we found it afterwards.
         #
-        # The allocation counters keep running while the collector is off, so
-        # the first collection after the parse is a full one. That is the point:
-        # one full collection over the finished tree, instead of several while
-        # it is being built.
+        # One full collection is run first. Switching the collector off makes
+        # the objects a parse allocates get promoted out of the young
+        # generations rather than scanned there, so a Kconfig instance that is
+        # later dropped -- which is what a script looping over architectures or
+        # boards does -- would be cyclic garbage surviving until the next full
+        # collection. Collecting here reclaims the previous tree before
+        # allocating this one, which keeps peak memory *below* what leaving the
+        # collector alone gives, and costs nothing on the usual single-load
+        # path, where there is nothing to collect yet.
         #
         # Only import as needed, to save some startup time
         import gc
         gc_was_enabled = gc.isenabled()
+        if gc_was_enabled:
+            gc.collect()
         gc.disable()
         try:
             self._init_inner(filename, warn, warn_to_stderr, encoding)
