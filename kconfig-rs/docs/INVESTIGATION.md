@@ -5,13 +5,23 @@ full Linux or Zephyr Kconfig at least ten times faster, and would the result be
 more readable than the Python?
 
 **Short answer.** Yes on both counts, but the headline number is not where you
-would expect it. On Zephyr — a pure parsing workload — a straightforward port
-runs **8–9x** faster. On Linux the same port runs only **1.5x** faster, because
-two thirds of a Linux load is not parsing at all: it is a hundred `fork`/`exec`
-compiler probes. Treat those as the cacheable pure functions they are and Linux
-goes to **29x**. Rust is the right language; Go measures 1.5–1.7x slower on the
-dominant loop and has a materially worse story for the Python interop Zephyr
-requires.
+would expect it, and part of it belongs to the Python.
+
+Two thirds of a Linux Kconfig load is not parsing at all: it is a hundred
+`fork`/`exec` compiler probes. Caching those, and keeping the cyclic garbage
+collector out of the parse, are **two patches to `kconfiglib.py`** worth 2.9x on
+Linux and 1.18x on Zephyr — no rewrite involved. They are in this branch.
+
+Measured against Kconfiglib *with* those patches, the Rust loader is **8.7x** on
+Linux and **7.6x** on Zephyr — a consistent order of magnitude, on the work that
+is actually parsing. Against Kconfiglib as it was, Linux reads 26x, but that
+number is mostly the probe cache, which the Python now has too.
+
+Rust is the right language for the native side; Go measures 1.5–1.7x slower on
+the dominant loop and has a materially worse story for the Python interop Zephyr
+requires. And the Python cannot close the remaining gap on its own —
+[eleven other things were tried](#what-the-python-can-get-on-its-own) and none of
+them moved it.
 
 Everything below is measured against a working prototype in
 [`kconfig-rs/`](../), which loads both trees and produces `.config` output
@@ -69,8 +79,9 @@ recorded still runs synchronously the first time it is asked for, so the cache
 is an optimization and never a correctness dependency.
 
 This is the single highest-value change in the whole investigation, and it is
-worth noting that **it is not a rewrite**. Kconfiglib could cache `_shell_fn` on
-disk today and get most of it.
+not a rewrite — so it is now **also in `kconfiglib.py`** on this branch, behind
+`KCONFIG_SHELL_CACHE`. A warm cache takes a full kernel load from 2.43 s to
+0.83 s.
 
 ## Finding 2: the parsing work itself is worth about 10x
 
@@ -81,25 +92,34 @@ parser and evaluator speed.
 
 | | total | breakdown |
 |---|---|---|
-| Kconfiglib | **2.569 s** | parse 2.503, eval+write 0.065, of which `$(shell)` 1.637 |
+| Kconfiglib, as it was | **2.432 s** | parse 2.364, eval+write 0.068, of which `$(shell)` ~1.6 |
 | C `conf --allnoconfig` | 2.058 s | includes the same probes |
+| Kconfiglib, patched | 2.301 s | the GC patch only; probes still run |
+| Kconfiglib, patched, probe cache warm | **0.830 s** | parse 0.702, eval+write 0.128 |
 | `kconf`, cold probe cache | 1.674 s | load 1.665, eval+write 0.009 |
-| `kconf`, warm probe cache | **0.088 s** | load 0.081, eval+write 0.007 |
+| `kconf`, warm probe cache | **0.095 s** | load 0.088, eval+write 0.007 |
 
-**29x** end-to-end with the cache warm; **10.6x** if you subtract the probes
-from both sides and compare only the work a rewrite can actually affect.
+Like for like — both implementations with a warm probe cache — the Rust is
+**8.7x**. Against Kconfiglib as it was it reads 26x, but most of that gap is the
+probe cache rather than the language.
 
 ### Zephyr, all boards
 
 | | total | breakdown |
 |---|---|---|
-| Kconfiglib | **1.642 s** | parse 1.559, eval+write 0.083 |
-| `kconf` | **0.195 s** | load 0.183, eval+write 0.012 |
+| Kconfiglib, as it was | **1.679 s** | parse 1.591, eval+write 0.088 |
+| Kconfiglib, patched | **1.410 s** | parse 1.224, eval+write 0.187 |
+| `kconf` | **0.186 s** | load 0.174, eval+write 0.012 |
 
-**8.4x.** Across runs this lands between 8.0x and 9.5x. Zephyr sits lower than
-Linux because it sources 6044 files to Linux's 1605, and opening and reading
-them costs 34 ms that no amount of parser speed removes — the same 34 ms
-Kconfiglib pays. Subtract file I/O from both sides and Zephyr is also ~10x.
+**7.6x** against the patched Python, 9.0x against the original. Zephyr sits
+lower than Linux because it sources 6044 files to Linux's 1605, and opening and
+reading them costs 34 ms that no amount of parser speed removes — the same 34 ms
+Kconfiglib pays.
+
+The patched Python spends noticeably more of its time rendering (0.187 s against
+0.088 s). That is the deferred cost of the GC patch: the first cyclic collection
+after the parse is a full one, which is the point — one full collection over the
+finished tree instead of six while it is being built.
 
 ### Where the remaining time goes
 
@@ -303,9 +323,10 @@ Python hooks are.
 
 If it were to be pursued, the order that keeps it useful throughout:
 
-1. **Cache the shell probes in `kconfiglib.py`.** Days of work, no rewrite, and
-   it is the largest single win available on Linux. Do this regardless of what
-   happens to the rest.
+1. ~~**Cache the shell probes in `kconfiglib.py`.**~~ Done on this branch,
+   along with keeping the cyclic collector out of the parse. Together: 2.9x on
+   the kernel, 1.18x on Zephyr, byte-identical output. Do this regardless of
+   what happens to the rest.
 2. **Finish the loader** — `.config` reading, `set_value`, warning parity.
 3. **Ship it as a Python extension behind Kconfiglib's API**, with the callback
    hook for `KCONFIG_FUNCTIONS`. Not a fork: an optional accelerator that the
@@ -325,6 +346,10 @@ cargo test                                          # 27 tests
 bench/parity.py                                     # every fixture vs Kconfiglib
 bench/bench.sh linux  /path/to/linux                # the tables above
 bench/bench.sh zephyr /path/to/zephyr
+
+bench/lex-python.py /path/to/tree                   # the Python tokenizer floor
+target/release/lexbench /path/to/tree               # the same algorithm in Rust
+(cd bench/lex-go && go run . /path/to/tree)         # and in Go
 ```
 
 `bench.sh` diffs the two implementations' output on every run, so a regression

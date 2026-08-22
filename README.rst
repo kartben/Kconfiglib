@@ -74,11 +74,16 @@ Experimental Rust loader
 `kconfig-rs/ <kconfig-rs/>`_ holds an experimental Rust port of the parsing and
 evaluation core, written to find out how much faster a native loader could be.
 It loads the full Linux and Zephyr trees and produces byte-identical ``.config``
-output, roughly 9x faster on Zephyr and 29x faster on Linux once the
-``$(shell,...)`` compiler probes are cached. It is a prototype, not a
-replacement: see `kconfig-rs/docs/INVESTIGATION.md
-<kconfig-rs/docs/INVESTIGATION.md>`_ for the measurements and for what adopting
-it would take.
+output, about 8x faster on both. It is a prototype, not a replacement: see
+`kconfig-rs/docs/INVESTIGATION.md <kconfig-rs/docs/INVESTIGATION.md>`_ for the
+measurements and for what adopting it would take.
+
+Two findings from that investigation belong to this library rather than to a
+rewrite, and are applied here: the cyclic garbage collector is switched off
+while parsing (nothing a parse allocates is cyclic garbage, and it was a fifth
+of the time on Zephyr), and ``$(shell,...)`` results can be cached across runs
+via ``KCONFIG_SHELL_CACHE``. Together they take a full kernel Kconfig load from
+2.43 s to 0.83 s.
 
 See `this page
 <https://docs.zephyrproject.org/latest/guides/kconfig/tips.html>`__ for some

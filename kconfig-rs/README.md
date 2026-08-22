@@ -6,10 +6,15 @@ faster loading a full Linux or Zephyr Kconfig can get, and whether the result
 reads better than the Python it came from.
 
 It loads the complete Linux and Zephyr trees and writes `.config` output that is
-**byte-identical to Kconfiglib's**, in about a tenth of the time — and about a
-thirtieth for Linux once the compiler probes are cached. See
+**byte-identical to Kconfiglib's**, about 8x faster on both. See
 [docs/INVESTIGATION.md](docs/INVESTIGATION.md) for the measurements, the design
 decisions behind them, and what adopting this would actually take.
+
+Two findings from that investigation turned out to belong to the Python, and are
+[already applied to `kconfiglib.py`](../kconfiglib.py): keeping the cyclic
+garbage collector out of the parse, and caching `$(shell,...)` compiler probes.
+Together they are worth 2.9x on the kernel. The 8x above is measured against
+Kconfiglib *with* those changes.
 
 This is a prototype, not a replacement. It covers loading and `.config` output;
 it does not yet read `.config` files back in, drive a `menuconfig`, or expose a
