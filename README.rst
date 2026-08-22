@@ -68,6 +68,18 @@ variable keeps the string as is.
 Note: See `this issue <https://github.com/ulfalizer/Kconfiglib/issues/47>`__ if
 you run into a "macro expanded to blank string" error with kernel 4.18+.
 
+Experimental Rust loader
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+`kconfig-rs/ <kconfig-rs/>`_ holds an experimental Rust port of the parsing and
+evaluation core, written to find out how much faster a native loader could be.
+It loads the full Linux and Zephyr trees and produces byte-identical ``.config``
+output, roughly 9x faster on Zephyr and 29x faster on Linux once the
+``$(shell,...)`` compiler probes are cached. It is a prototype, not a
+replacement: see `kconfig-rs/docs/INVESTIGATION.md
+<kconfig-rs/docs/INVESTIGATION.md>`_ for the measurements and for what adopting
+it would take.
+
 See `this page
 <https://docs.zephyrproject.org/latest/guides/kconfig/tips.html>`__ for some
 Kconfig tips and best practices.

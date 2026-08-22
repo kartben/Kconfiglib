@@ -1,0 +1,16 @@
+kconf - load a Kconfig tree
+
+USAGE:
+    kconf [OPTIONS] [KCONFIG]
+
+ARGS:
+    KCONFIG    Top-level Kconfig file, relative to $srctree (default: Kconfig)
+
+OPTIONS:
+    --write-config <PATH>   Write a .config to PATH, or "-" for stdout
+    --shell-cache <PATH>    Persist $(shell,...) results at PATH
+    --probe-jobs <N>        Threads for re-probing a stale shell cache
+    --repeat <N>            Load N times and report the fastest run
+    --stats                 Print symbol, expression and probe counts
+    --quiet                 Suppress warnings
+    -h, --help              Show this help

@@ -1,0 +1,26 @@
+[package]
+name = "kconfig"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A fast Kconfig loader — experimental Rust port of Kconfiglib's parser and evaluator"
+license = "ISC"
+
+[dependencies]
+glob = "0.3"
+memchr = "2"
+rustc-hash = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[[bin]]
+name = "kconf"
+path = "src/bin/kconf.rs"
+
+[[bin]]
+name = "lexbench"
+path = "src/bin/lexbench.rs"
